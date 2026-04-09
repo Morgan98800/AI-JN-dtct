@@ -1,6 +1,6 @@
 # AI Text Detector
 
-A fast, frontend-only heuristic detector that estimates whether a piece of text was produced by AI or is predominantly human-written. Runs entirely in the browser with no network requests.
+A fast, frontend-only heuristic detector that estimates whether text was produced by AI or is predominantly human-written. Features **segment-level heat-map highlighting** to identify which parts are AI-like. Runs entirely in the browser with no network requests.
 
 ## Live Demo
 
@@ -8,49 +8,130 @@ A fast, frontend-only heuristic detector that estimates whether a piece of text 
 
 ## Features
 
-- **Percentage Score (0–100%)**
-  - 0–20%: Mostly human-like
-  - 20–60%: Mixed/uncertain signals
-  - 60–100%: Strong AI-like patterns
+- **Document-Level Score (0–100%)**
+  - 0–25%: Very likely human-written
+  - 25–50%: Likely human-written
+  - 50–75%: Likely AI-generated
+  - 75–100%: Very likely AI-generated
 
-- **Detailed Analysis Signals**
-  - **Text Metrics**: word count, sentence count, length variation
-  - **Lexical**: vocabulary diversity, repeated phrases, AI buzzwords detected
-  - **Style**: formality level, first-person usage, personal detail density
-  - **Discourse**: connector density, structural patterns
-  - **Segment Scores**: per-paragraph AI likelihood for longer texts (>300 words)
+- **Segment-Level Heat-Map Highlighting** ✨
+  - Each sentence color-coded by AI likelihood:
+    - 🟢 **Green** (0–25%): Human signals detected
+    - 🟡 **Amber** (25–50%): Mixed indicators
+    - 🔴 **Red** (50–75%): AI-like patterns
+    - 🔴 **Dark Red** (75–100%): Strong AI indicators
+  - Inline score badges `[85%]` on each segment
+  - Per-segment flags explaining what triggered the score
+
+- **Sigmoid-Normalized Scoring**
+  - Raw algorithmic weights from 0.0–1.0 + Sigmoid curve (not linear addition)
+  - Smooth, principled probability distribution
+  - No artificial caps or arbitrary thresholds
+  - Eliminates "weirdness" from simple +/- heuristics
+
+- **Tiered Vocabulary Analysis**
+  - **Tier 1**: RLHF over-indexed AI terms (40+ words: "delve", "tapestry", "paradigm", etc.)
+  - **Tier 2**: Structural connectors (25+ phrases: "it is important to note", "furthermore")
+  - **Tier 3**: Safety padding/hedges (13+ phrases: "complex and nuanced")
+
+- **Macro-Document Context**
+  - **Burstiness Score**: Sentence length variance (low = AI uniformity; high = human variety)
+  - **Redundancy Index**: Vocabulary overlap between consecutive segments (high = AI repetition)
+  - Global flags explaining document-level patterns
+
+- **Human Signal Detection**
+  - Contractions ("I'm", "don't", "can't") — strong human indicator
+  - Slang and informal language ("yeah", "kinda", "basically")
+  - First-person phrasing ("I think", "I found", "in my opinion")
+  - Concrete details (years, dates, specific numbers)
 
 - **Context-Aware Warnings**
-  - Reliability caveats for short texts
+  - Reliability caveats for short texts (<150 words)
   - False-positive risk on formal human writing
-  - Notes on mixed/inconsistent patterns
+  - Confidence level displayed (Low/Medium/High)
 
 ## How It Works
 
-The detector uses **rule-based heuristics** to analyze:
+The detector uses a **production-grade heuristic pipeline** with segment-level analysis and mathematical normalization:
 
-1. **Sentence Structure**
-   - Very uniform lengths + long sentences → AI-like
-   - High variation, mixed short/long → human-like
+### 1. Text Segmentation (Robust Tokenization)
+- Splits input into individual sentences
+- Handles abbreviations (Dr., e.g., etc.) to prevent incorrect boundaries
+- Each segment is analyzed independently before document-level scoring
 
-2. **Vocabulary**
-   - Low diversity, generic phrases → AI-like
-   - High diversity, concrete details → human-like
+### 2. Per-Segment Feature Extraction
 
-3. **Formality & Language**
-   - Many discourse connectors ("however", "moreover") → AI-like
-   - Contractions, slang, first-person pronouns → human-like
+For each sentence, the detector calculates:
 
-4. **Text Patterns**
-   - Overused academic buzzwords ("crucial", "leverage", "synergy")
-   - Personal details (dates, places, numbers)
-   - Structural regularity (paragraph patterns)
+| Feature | AI Signal | Human Signal |
+|---------|-----------|--------------|
+| **Tier 1 Vocabulary** | "delve", "tapestry", "multifaceted" (40+ terms) | — |
+| **Tier 2 Connectors** | "it is important to note", "furthermore" (25+ phrases) | — |
+| **Tier 3 Hedges** | Safety padding, "complex and nuanced" | — |
+| **Contractions** | — | "I'm", "don't", "can't" (strong reducer) |
+| **Slang/Informal** | — | "yeah", "kinda", "basically" |
+| **First-Person** | — | "I think", "I found", "in my opinion" |
+| **Concrete Details** | — | Years, dates, specific numbers |
+| **Punctuation** | High em-dash (—) and colon (:) usage | Lower density |
 
-### Conservative Bias
-The detector is designed to avoid **false positives** (marking human text as AI):
-- Short texts (<300 words) are restricted to medium confidence
-- Strong human signals cap the AI score at 0.7
-- Highly formal, polished texts get a warning about false-positive risk
+### 3. Macro-Document Features
+- **Sentence Burstiness**: Standard deviation of sentence lengths
+  - Low variance (uniform) → AI-like (typical coefficient of variation 0.15–0.25)
+  - High variance (mixed) → Human-like (typical 0.50+)
+- **Vocabulary Redundancy**: Jaccard similarity between consecutive segments
+  - High overlap (>40%) → AI-like (repetitive)
+  - Low overlap (<20%) → Human-like (varied)
+
+### 4. Sigmoid Normalization (Mathematical Smoothing)
+Instead of linear addition ("add 10 for this word, subtract 5 for a contraction"):
+- Combine all segment scores and macro-features into a **raw algorithmic weight** (0.0–1.0)
+- Pass through Sigmoid curve: `1 / (1 + e^(-0.8 * (x - 0.5)))`
+- Result: smooth, principled probability distribution
+  - Eliminates arbitrary caps and thresholds
+  - No more "balloons to 110%" or "crashes to 0%"
+  - Properly handles mixed-signal documents
+
+### 5. Confidence & Safety Measures
+- **Short Text Protection**: Confidence capped for <150 words
+- **Formal Writing Protection**: Conservative score caps if strong human signals + formal structure detected
+- **Per-Segment Explanation**: Flags on each segment explain what triggered its score
+
+## API Output Schema
+
+The `analyzeText(text)` function returns:
+
+```javascript
+{
+  documentScore: 72,                    // 0–100 final probability (Sigmoid-normalized)
+  confidenceLevel: "High",              // Low/Medium/High based on word count
+  globalFlags: [
+    "Low Sentence Variance",            // Macro-level observations
+    "High Repetition Index",
+    "Strong AI Detection Signals"
+  ],
+  segments: [                           // Heat-map data: each sentence scored
+    {
+      text: "The rapid advancement of technology is a multifaceted tapestry.",
+      segmentScore: 85,                 // 0–100 per-segment score
+      flags: ["Tier 1 Vocab: advancement technology"]  // Why it scored high
+    },
+    {
+      text: "I personally think we should focus on the numbers from 2024.",
+      segmentScore: 18,
+      flags: ["First-person phrasing", "Human signal: contractions"]
+    }
+  ],
+  _metadata: {                          // Debugging / advanced inspection
+    totalSegments: 42,
+    burstinessScore: 35,                // 0–100 (low = uniform = AI)
+    redundancyScore: 62,                // 0–100 (high = repetitive = AI)
+    documentWordCount: 1248,
+    meanSegmentScore: 48
+  }
+}
+```
+
+---
 
 ## Installation & Development
 
@@ -93,12 +174,22 @@ src/
 
 ## Limitations ⚠️
 
-- **Not definitive proof**: This is a probabilistic heuristic, not a trained ML model.
-- **False positives**: Can incorrectly flag formal human writing as AI-like.
-- **False negatives**: Sophisticated human writing or edited AI text may not be detected.
-- **Short texts unreliable**: <300 words give low confidence scores.
-- **No network checking**: Cannot detect if text was retrieved from remote APIs.
-- **Limited language support**: Optimized for English; other languages may have higher error rates.
+- **Not definitive proof**: This is a probabilistic heuristic, not a trained ML model. Use for screening, not accusation.
+- **False positives**: Can incorrectly flag formal human writing (academic papers, professional reports) as AI-like. The constraint applies conservative caps to mitigate.
+- **False negatives**: Sophisticated human writing, lightly edited AI text, or domain-specific jargon may not be reliably detected.
+- **Short texts (<150 words)**: Confidence is inherently low; statistical reliability requires more data.
+- **Language**: Optimized for English. Other languages may have higher error rates.
+- **Mixed content**: Documents with both AI-generated and human-written sections will show mixed segment scores (this is expected).
+- **No network validation**: Cannot detect if text originated from APIs; focuses on linguistic patterns only.
+
+### Key Improvements in This Version
+
+- ✅ **No arbitrary scoring**: Sigmoid normalization replaces linear addition
+- ✅ **Transparent per-segment analysis**: See which sentences drive the overall score
+- ✅ **Heat-map highlighting**: Color-coded visual feedback for mixed documents
+- ✅ **Robust tokenization**: Handles abbreviations correctly
+- ✅ **Macro-level context**: Burstiness and redundancy scoring for document structure
+- ✅ **Better accuracy on formal text**: Conservative bias protections reduce false positives
 
 ## For Production Use
 
@@ -112,7 +203,13 @@ For serious AI detection needs, consider:
 
 - **Frontend**: React 18 + Vite
 - **Runtime**: Pure JavaScript (no external ML libraries)
+- **Algorithms**: 
+  - Segment-level feature extraction (per-sentence analysis)
+  - Sigmoid normalization for score smoothing
+  - Burstiness calculation (coefficient of variation)
+  - Redundancy indexing (Jaccard similarity)
 - **Deployment**: Surge (static hosting)
+- **Bundle Size**: ~50 KB gzipped
 
 ## License
 
