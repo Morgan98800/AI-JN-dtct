@@ -37,7 +37,17 @@ A fast, frontend-only heuristic detector that estimates whether text was produce
 - **Macro-Document Context**
   - **Burstiness Score**: Sentence length variance (low = AI uniformity; high = human variety)
   - **Redundancy Index**: Vocabulary overlap between consecutive segments (high = AI repetition)
+  - **Readability Variance**: Flesch-Kincaid grade level consistency (zero variance = AI uniformity)
   - Global flags explaining document-level patterns
+
+- **Advanced NLP Heuristics** ✨
+  - **Lexical Rarity (Zipf Index)**: Ratio of "rare words" (not in top 1000 common English words). AI artificially inflates rare words; humans use natural distribution.
+  - **Syntactic Depth Proxy**: Measures subordinating conjunctions and internal commas relative to sentence length. AI uses long sentences with shallow clause depth; humans vary.
+  - **Flesch-Kincaid Readability**: Grade-level estimation per segment. Tracks variance—zero variance = AI (uniform difficulty); high variance = human (intentional style changes).
+  - **AI Artifact Detection**: Scans for "helpful assistant" formatting tropes:
+    - Preambles: "Here is...", "Certainly!", "Sure!", "Of course"
+    - Formatting: **Concept:** patterns, perfect bullet-point lists, excessive heading markup
+    - Penalties applied for suspicious structural regularity
 
 - **Human Signal Detection**
   - Contractions ("I'm", "don't", "can't") — strong human indicator
@@ -73,6 +83,10 @@ For each sentence, the detector calculates:
 | **First-Person** | — | "I think", "I found", "in my opinion" |
 | **Concrete Details** | — | Years, dates, specific numbers |
 | **Punctuation** | High em-dash (—) and colon (:) usage | Lower density |
+| **Lexical Rarity** | High % of rare words (Zipf >45%) | Natural word distribution |
+| **Syntactic Depth** | Long sentences, shallow clause depth | Varied clause complexity |
+| **Readability Variance** | Zero variance (uniform grade levels) | Mixed (intentional style shifts) |
+| **AI Artifacts** | **Bold:** patterns, preambles, bullet lists | Organic formatting |
 
 ### 3. Macro-Document Features
 - **Sentence Burstiness**: Standard deviation of sentence lengths
@@ -81,6 +95,9 @@ For each sentence, the detector calculates:
 - **Vocabulary Redundancy**: Jaccard similarity between consecutive segments
   - High overlap (>40%) → AI-like (repetitive)
   - Low overlap (<20%) → Human-like (varied)
+- **Readability Variance**: Flesch-Kincaid grade level consistency across segments
+  - Zero variance (<0.10 CV) → AI-like (uniform difficulty)
+  - High variance (>0.35 CV) → Human-like (intentional style variation)
 
 ### 4. Sigmoid Normalization (Mathematical Smoothing)
 Instead of linear addition ("add 10 for this word, subtract 5 for a contraction"):
@@ -125,6 +142,7 @@ The `analyzeText(text)` function returns:
     totalSegments: 42,
     burstinessScore: 35,                // 0–100 (low = uniform = AI)
     redundancyScore: 62,                // 0–100 (high = repetitive = AI)
+    readabilityVarianceScore: 28,       // 0–100 (low = uniform difficulty = AI)
     documentWordCount: 1248,
     meanSegmentScore: 48
   }
@@ -188,7 +206,8 @@ src/
 - ✅ **Transparent per-segment analysis**: See which sentences drive the overall score
 - ✅ **Heat-map highlighting**: Color-coded visual feedback for mixed documents
 - ✅ **Robust tokenization**: Handles abbreviations correctly
-- ✅ **Macro-level context**: Burstiness and redundancy scoring for document structure
+- ✅ **Macro-level context**: Burstiness, redundancy, and readability variance scoring
+- ✅ **Advanced NLP heuristics**: Lexical rarity (Zipf), syntactic depth, readability variance, AI artifact detection
 - ✅ **Better accuracy on formal text**: Conservative bias protections reduce false positives
 
 ## For Production Use
