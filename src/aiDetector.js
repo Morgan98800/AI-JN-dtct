@@ -52,6 +52,70 @@ const HUMAN_SLANG = new Set([
 
 const HUMAN_FIRST_PERSON = /\b(I think|I believe|I found|I discovered|I experienced|we discovered|I personally|in my opinion|from my perspective|based on my experience)\b/gi;
 
+// ============================================================================
+// LEXICAL RARITY: ~1,000 Most Common English Words (Zipf's Law)
+// Words NOT in this list are considered "rare" (AI often over-indexes rare words)
+// ============================================================================
+const COMMON_WORDS = new Set([
+  'the', 'be', 'to', 'of', 'and', 'a', 'in', 'that', 'have', 'i', 'it', 'for',
+  'not', 'on', 'with', 'he', 'as', 'you', 'do', 'at', 'this', 'but', 'his',
+  'by', 'from', 'they', 'we', 'say', 'her', 'she', 'or', 'an', 'will', 'my',
+  'one', 'all', 'would', 'there', 'their', 'what', 'so', 'up', 'out', 'if',
+  'about', 'who', 'get', 'which', 'go', 'me', 'when', 'make', 'can', 'like',
+  'time', 'no', 'just', 'him', 'know', 'take', 'people', 'into', 'year',
+  'your', 'good', 'some', 'could', 'them', 'see', 'other', 'than', 'then',
+  'now', 'look', 'only', 'come', 'its', 'over', 'think', 'also', 'back',
+  'after', 'use', 'two', 'how', 'our', 'work', 'first', 'well', 'way', 'even',
+  'new', 'want', 'because', 'any', 'these', 'give', 'day', 'most', 'us', 'is',
+  'was', 'are', 'been', 'being', 'has', 'had', 'does', 'did', 'am', 'should',
+  'seem', 'might', 'may', 'must', 'can', 'could', 'shall', 'might', 'ought',
+  'through', 'where', 'why', 'how', 'all', 'each', 'every', 'both', 'either',
+  'neither', 'another', 'much', 'many', 'more', 'most', 'such', 'own', 'same',
+  'tell', 'boy', 'follow', 'came', 'want', 'show', 'also', 'around', 'form',
+  'three', 'small', 'set', 'put', 'end', 'does', 'another', 'well', 'large',
+  'must', 'big', 'even', 'such', 'turn', 'here', 'why', 'ask', 'went', 'read',
+  'need', 'land', 'different', 'home', 'us', 'move', 'try', 'kind', 'hand',
+  'picture', 'again', 'change', 'off', 'play', 'spell', 'away', 'animal',
+  'house', 'point', 'page', 'letter', 'mother', 'father', 'children', 'men',
+  'women', 'boy', 'girl', 'man', 'woman', 'child', 'person', 'people', 'made',
+  'part', 'place', 'high', 'keep', 'last', 'long', 'life', 'live', 'make',
+  'mean', 'old', 'open', 'please', 'right', 'said', 'seem', 'side', 'small',
+  'still', 'take', 'tell', 'thank', 'their', 'them', 'then', 'there', 'these',
+  'they', 'think', 'this', 'those', 'three', 'through', 'time', 'today', 'told',
+  'too', 'took', 'top', 'toward', 'tree', 'turn', 'two', 'under', 'until', 'very',
+  'wait', 'warm', 'wash', 'water', 'wear', 'week', 'went', 'were', 'when', 'which',
+  'while', 'white', 'who', 'whole', 'whom', 'why', 'will', 'with', 'without',
+  'word', 'work', 'world', 'would', 'write', 'wrong', 'year', 'yes', 'yet', 'young'
+]);
+
+// ============================================================================
+// SUBORDINATING CONJUNCTIONS (Syntactic Depth Indicator)
+// ============================================================================
+const SUBORDINATING_CONJUNCTIONS = new Set([
+  'although', 'though', 'whereas', 'while', 'since', 'because', 'if', 'unless',
+  'provided', 'as', 'except', 'lest', 'when', 'where', 'why', 'how', 'once',
+  'until', 'before', 'after', 'whenever', 'wherever', 'whoever', 'whomever',
+  'whatever', 'whichever', 'provide', 'suppose', 'supposing', 'insofar', 'inasmuch'
+]);
+
+// ============================================================================
+// AI ARTIFACT PATTERNS (Formatting & Preamble Tropes)
+// ============================================================================
+const AI_PREAMBLE_PATTERNS = [
+  /^here\s+is/i,
+  /^certainly\s*[!.]/i,
+  /^sure[!.]/i,
+  /^of\s+course/i,
+  /^absolutely/i,
+  /^well\s*,/i,
+  /^let\s+me/i
+];
+
+const AI_FORMATTING_PATTERNS = [
+  /\*\*[^*]+:\s*/g,
+  /^[-*]\s+\*\*[^*]+\*\*/gm,
+  /###\s+/g
+];
 
 // ============================================================================
 // MATHEMATICAL NORMALIZATION: Sigmoid Curve
@@ -134,6 +198,154 @@ function arrayStats(arr) {
   const variance = arr.reduce((s, x) => s + Math.pow(x - mean, 2), 0) / arr.length;
   const stddev = Math.sqrt(variance);
   return { mean, stddev };
+}
+
+// ============================================================================
+// ADVANCED FEATURE EXTRACTORS (Lexical Rarity, Syntactic Depth, Readability)
+// ============================================================================
+
+/**
+ * Calculate lexical rarity: ratio of words NOT in top 1000 common words
+ * AI text often artificially inflates rare words despite poor vocabulary diversity
+ * @param {string[]} words - Tokenized words
+ * @returns {number} Rarity score (0-1, higher = more rare words = more AI-like)
+ */
+function calculateLexicalRarity(words) {
+  if (!words.length) return 0;
+  let rareCount = 0;
+  for (const word of words) {
+    if (!COMMON_WORDS.has(word)) {
+      rareCount++;
+    }
+  }
+  return rareCount / words.length;
+}
+
+/**
+ * Estimate syllable count using regex approximation
+ * Used for Flesch-Kincaid readability scoring
+ * @param {string} word - Single word
+ * @returns {number} Estimated syllable count
+ */
+function estimateSyllables(word) {
+  word = word.toLowerCase();
+  if (word.length <= 3) return 1;
+  
+  // Count vowel groups
+  let syllables = 0;
+  let previousWasVowel = false;
+  const vowels = 'aeiouy';
+  
+  for (let i = 0; i < word.length; i++) {
+    const isVowel = vowels.includes(word[i]);
+    if (isVowel && !previousWasVowel) {
+      syllables++;
+    }
+    previousWasVowel = isVowel;
+  }
+  
+  // Adjust for silent 'e'
+  if (word.endsWith('e')) {
+    syllables--;
+  }
+  if (word.endsWith('le') && word.length > 2 && !vowels.includes(word[word.length - 3])) {
+    syllables++;
+  }
+  
+  return Math.max(1, syllables);
+}
+
+/**
+ * Calculate Flesch-Kincaid Grade Level (simplified)
+ * Higher grade = harder to read. AI tends toward very uniform grade levels.
+ * @param {string} segmentText - Text to analyze
+ * @returns {number} Grade level (0-18+)
+ */
+function calculateFleschKincaid(segmentText) {
+  const words = tokenizeWords(segmentText);
+  const sentences = segmentText.split(/[.!?]+/).filter(s => s.trim().length);
+  
+  if (!words.length || !sentences.length) return 0;
+  
+  let totalSyllables = 0;
+  for (const word of words) {
+    totalSyllables += estimateSyllables(word);
+  }
+  
+  // FK = 0.39 * (words/sentences) + 11.8 * (syllables/words) - 15.59
+  const fk = 0.39 * (words.length / sentences.length) + 
+             11.8 * (totalSyllables / words.length) - 15.59;
+  
+  return Math.max(0, Math.min(18, fk));
+}
+
+/**
+ * Calculate syntactic depth: ratio of subordinating conjunctions and comma clauses
+ * AI tends toward shallow syntax (simple clause structures) despite long sentences
+ * @param {string} segmentText - Text to analyze
+ * @returns {number} Syntactic depth score (0-1)
+ */
+function calculateSyntacticDepth(segmentText) {
+  const words = tokenizeWords(segmentText);
+  if (!words.length) return 0;
+  
+  // Count subordinating conjunctions
+  let subordinateCount = 0;
+  for (const conj of SUBORDINATING_CONJUNCTIONS) {
+    const regex = new RegExp(`\\b${conj}\\b`, 'gi');
+    const matches = segmentText.match(regex);
+    if (matches) subordinateCount += matches.length;
+  }
+  
+  // Count comma clauses (internal commas suggesting clausal depth)
+  const internalCommas = (segmentText.match(/,/g) || []).length - 1; // -1 for trailing commas
+  
+  const totalDepthMarkers = subordinateCount + Math.max(0, internalCommas);
+  
+  // Normalize: depth is good, so return as a ratio
+  // AI tends toward LOW syntactic depth despite long sentences: penalize
+  return totalDepthMarkers / Math.max(1, words.length);
+}
+
+/**
+ * Detect "helpful assistant" formatting/preamble artifacts
+ * Heavy penalty for AI-specific tropes
+ * @param {string} text - Full text or segment
+ * @returns {number} Artifact score (0-1, higher = more AI-like)
+ */
+function detectAIFormatArtifacts(text) {
+  let artifactScore = 0;
+  
+  // Check preamble patterns
+  const lines = text.split('\n');
+  if (lines.length > 0) {
+    for (const pattern of AI_PREAMBLE_PATTERNS) {
+      if (pattern.test(lines[0])) {
+        artifactScore += 0.20; // Heavy penalty
+      }
+    }
+  }
+  
+  // Check formatting patterns
+  let formatMatches = 0;
+  for (const pattern of AI_FORMATTING_PATTERNS) {
+    const matches = text.match(pattern) || [];
+    formatMatches += matches.length;
+  }
+  
+  // Penalize excessive **Concept:** patterns
+  if (formatMatches > 3) {
+    artifactScore += Math.min(0.25, formatMatches * 0.05);
+  }
+  
+  // Check for perfect bullet-point lists
+  const bulletPoints = (text.match(/^[-*]\s+/gm) || []).length;
+  const lines_ = text.split('\n').filter(l => l.trim());
+  if (bulletPoints > 3 && (bulletPoints / lines_.length) > 0.5) {
+    artifactScore += 0.15; // Suspiciously regular structure
+  }
+  
+  return Math.min(1, artifactScore);
 }
 
 // ============================================================================
@@ -260,6 +472,47 @@ function analyzeSegment(segmentText, documentWords = []) {
     if (dates > 0) flags.push(`Specific date(s): ${dates}`);
   }
   
+  // --- NEW FEATURE 1: LEXICAL RARITY (Zipf Index) ---
+  const rarity = calculateLexicalRarity(words);
+  if (rarity > 0.45) {
+    // High rare word density suggests AI (artificially inflating rare words)
+    rawScore += rarity * 0.15;
+    flags.push(`High lexical rarity: ${Math.round(rarity * 100)}% rare words`);
+  } else if (rarity < 0.25) {
+    // Very low rarity (all common words) suggests human
+    rawScore -= 0.05;
+    flags.push('Low lexical rarity: common vocabulary');
+  }
+  
+  // --- NEW FEATURE 2: SYNTACTIC DEPTH (Clause Complexity) ---
+  const syntacticDepth = calculateSyntacticDepth(segmentText);
+  if (syntacticDepth < 0.05 && wordCount > 15) {
+    // Long sentence but shallow syntax = AI (simple clauses strung together)
+    rawScore += 0.12;
+    flags.push('Shallow syntax: long sentences, simple clauses');
+  } else if (syntacticDepth > 0.15) {
+    // Rich syntactic complexity = human (varied clause structures)
+    rawScore -= 0.10;
+    flags.push('Complex syntax: varied clause structures');
+  }
+  
+  // --- NEW FEATURE 3: READABILITY VARIANCE (Flesch-Kincaid) ---
+  const fk = calculateFleschKincaid(segmentText);
+  if (fk < 4) {
+    // Very easy readability (grade 4 or lower) = unusual, could be AI simplifying
+    rawScore += 0.08;
+  } else if (fk > 14) {
+    // Very complex reading level (college+) = human academic writing
+    rawScore -= 0.08;
+  }
+  
+  // --- NEW FEATURE 4: AI FORMATTING ARTIFACTS ---
+  const artifactScore = detectAIFormatArtifacts(segmentText);
+  if (artifactScore > 0.1) {
+    rawScore += artifactScore * 0.20; // Heavily penalize artifacts
+    flags.push('AI formatting artifacts detected');
+  }
+  
   // Clamp per-segment score
   rawScore = Math.max(0, Math.min(rawScore, 1));
   
@@ -335,6 +588,27 @@ function calculateRedundancy(segments) {
   return 0.20; // Low repetition (human-like)
 }
 
+/**
+ * Calculate readability variance (Flesch-Kincaid scores across document)
+ * Zero or near-zero variance = AI (uniform reading difficulty)
+ * High variance = Human (mix of simple and complex writing)
+ */
+function calculateReadabilityVariance(segments) {
+  if (segments.length < 2) return 0.5;
+  
+  const fkScores = segments.map(seg => calculateFleschKincaid(seg));
+  const stats = arrayStats(fkScores);
+  
+  // CV of readability levels
+  const cv = stats.mean > 0 ? stats.stddev / stats.mean : 0;
+  
+  // Extremely uniform readability = AI (all segments same difficulty)
+  if (cv < 0.10) return 0.70; // Very AI-like
+  if (cv < 0.20) return 0.50; // Moderate
+  if (cv < 0.35) return 0.30; // More human-like
+  return 0.10; // High variance = very human-like (intentional style variation)
+}
+
 // ============================================================================
 // MAIN EXPORT: analyzeText(inputText)
 // ============================================================================
@@ -390,6 +664,7 @@ export function analyzeText(inputText) {
   // ========================================================================
   const burstinessScore = calculateBurstiness(sentences);
   const redundancyScore = calculateRedundancy(sentences);
+  const readabilityVarianceScore = calculateReadabilityVariance(sentences);
   
   // Calculate mean segment score
   const meanSegmentScore = segments.length > 0
@@ -407,6 +682,9 @@ export function analyzeText(inputText) {
   
   // Redundancy: High overlap = AI-like, so add positive contribution
   rawWeight += redundancyScore * 0.15;
+  
+  // Readability Variance: Zero variance = AI-like (uniform difficulty)
+  rawWeight += readabilityVarianceScore * 0.10;
   
   // Conservative adjustments
   if (documentWordCount < 150) {
@@ -435,6 +713,9 @@ export function analyzeText(inputText) {
   }
   if (redundancyScore > 0.50) {
     globalFlags.push('High Repetition Index');
+  }
+  if (readabilityVarianceScore > 0.50) {
+    globalFlags.push('Uniform Readability (low variance)');
   }
   if (segments.some(s => s.segmentScore > 0.75)) {
     globalFlags.push('High-Risk Segments Detected');
@@ -474,6 +755,7 @@ export function analyzeText(inputText) {
       totalSegments: segments.length,
       burstinessScore: Math.round(burstinessScore * 100),
       redundancyScore: Math.round(redundancyScore * 100),
+      readabilityVarianceScore: Math.round(readabilityVarianceScore * 100),
       documentWordCount,
       meanSegmentScore: Math.round(meanSegmentScore * 100)
     }
