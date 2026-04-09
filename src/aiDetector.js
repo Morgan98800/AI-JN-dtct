@@ -1,6 +1,7 @@
 // src/aiDetector.js
-// Segment-Level AI Text Heuristic Detector with Sigmoid Normalization
-// Returns { documentScore, confidenceLevel, globalFlags, segments[] } for heat-map highlighting
+// PRINCIPAL REFACTOR: Exponential Scaling + Archaic Bypass + Asymmetric Baseline
+// Fixes: (1) Sigmoid Collapse via exponential multiplication (2) Bible Problem via Tier 4
+// Returns { documentScore (0.00-1.00 float), confidenceLevel, globalFlags, segments[] }
 
 // ============================================================================
 // TIER 1: HIGH AI CORRELATION VOCABULARY (RLHF-trained 2024-2026 over-indexed)
@@ -40,6 +41,22 @@ const TIER_3_HEDGES = new Set([
 ]);
 
 // ============================================================================
+// TIER 4: ARCHAIC/LITERARY ENGLISH (Bible, Shakespeare, Ancient Texts)
+// Detects: "thou", "shalt", "thee", "hath", etc. + rhetorical repetition
+// RULE: If triggered, drastically reduce AI score (modern LLMs don't write like this)
+// ============================================================================
+const TIER_4_ARCHAIC = new Set([
+  'thou', 'thee', 'thy', 'thine', 'shalt', 'hath', 'doth', 'dost',
+  'beseech', 'unto', 'brethren', 'ye', 'verily', 'forsooth', 'prithee',
+  'methinks', 'bethink', 'wherewithal', 'whenceforth', 'hither', 'thither',
+  'betwixt', 'speaketh', 'saith', 'wroth', 'smote', 'begat', 'begrudge',
+  'adieu', 'perchance', 'mayhap', 'nitherto', 'aught', 'naught', 'oft',
+  'erstwhile', 'anon', 'albeit', 'fain', 'plight', 'nay', 'yea', 'wherefore',
+  'whence', 'hath', 'hast', 'hadst', 'wouldst', 'couldst', 'shouldst',
+  'deem', 'doth', 'dost', 'doest', 'befall', 'betide', 'spake', 'spakest'
+]);
+
+// ============================================================================
 // HUMAN SIGNALS (Strong Reducers)
 // ============================================================================
 const HUMAN_CONTRACTIONS = /\b(I'm|don't|can't|won't|it's|we're|they're|isn't|aren't|wasn't|weren't|haven't|hasn't|hadn't|didn't|shouldn't|wouldn't|couldn't|Here's|That's|What's|Who's|y'all|ain't|'em|'bout|gonna|wanna|gotta)\b/gi;
@@ -54,7 +71,6 @@ const HUMAN_FIRST_PERSON = /\b(I think|I believe|I found|I discovered|I experien
 
 // ============================================================================
 // LEXICAL RARITY: ~1,000 Most Common English Words (Zipf's Law)
-// Words NOT in this list are considered "rare" (AI often over-indexes rare words)
 // ============================================================================
 const COMMON_WORDS = new Set([
   'the', 'be', 'to', 'of', 'and', 'a', 'in', 'that', 'have', 'i', 'it', 'for',
@@ -609,21 +625,74 @@ function calculateReadabilityVariance(segments) {
   return 0.10; // High variance = very human-like (intentional style variation)
 }
 
+/**
+ * Detect anaphora: consecutive sentences starting with the same word
+ * E.g., "And... And... And..." or "The... The... The..." (literary pattern)
+ * Signs of literary/rhetorical writing, NOT typical LLM output
+ */
+function detectAnaphora(text) {
+  const sentences = tokenizeSentences(text);
+  if (sentences.length < 4) return false;
+  
+  const firstWords = sentences.map(s => {
+    const words = tokenizeWords(s);
+    return words.length > 0 ? words[0] : '';
+  });
+  
+  // Check for 4+ consecutive identical first words (strong literary signal)
+  for (let i = 0; i < firstWords.length - 3; i++) {
+    const w = firstWords[i];
+    if (
+      w.length > 2 &&
+      w === firstWords[i + 1] &&
+      w === firstWords[i + 2] &&
+      w === firstWords[i + 3]
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Detect archaic/literary English (Tier 4)
+ * Returns { archaicCount, hasAnaphora }
+ * If this triggers, drastically reduce AI score
+ */
+function detectArchaic(text) {
+  const words = tokenizeWords(text);
+  const archaicCount = words.filter(w => TIER_4_ARCHAIC.has(w)).length;
+  const hasAnaphora = detectAnaphora(text);
+  return { archaicCount, hasAnaphora };
+}
+
 // ============================================================================
 // MAIN EXPORT: analyzeText(inputText)
 // ============================================================================
 
 /**
- * Complete segment-level AI text analysis with Sigmoid normalization
+ * REFACTORED DETECTOR: Exponential Scaling + Archaic Bypass + Asymmetric Baseline
+ * 
+ * FIXES:
+ * (1) Sigmoid Collapse → Exponential scaling replaces linear addition
+ * (2) Bible Problem → Tier 4 Archaic Detection + Anaphora Detection
+ * 
+ * ARCHITECTURE:
+ * - Asymmetric baseline: Start at 8% (human is default state)
+ * - Exponential multiplication: Tier 1 phrases × (1 + count)^1.5
+ * - Human signals as hard divisor: aiWeight /= (1 + contractionCount)
+ * - Archaic bypass: If detected, multiply by 0.05-0.10
+ * - Multiple heuristic requirement: Only >60% if 2+ overlapping signals
+ * 
  * @param {string} inputText - Text to analyze
- * @returns {object} { documentScore, confidenceLevel, globalFlags, segments[] }
+ * @returns {object} { documentScore (0.00-1.00 float), confidenceLevel, globalFlags, segments[] }
  */
 export function analyzeText(inputText) {
   const text = (inputText || '').toString().trim();
   
   if (!text) {
     return {
-      documentScore: 0,
+      documentScore: 0.00,
       confidenceLevel: 'Low',
       globalFlags: ['No text provided'],
       segments: []
@@ -635,7 +704,7 @@ export function analyzeText(inputText) {
   
   if (sentences.length === 0) {
     return {
-      documentScore: 0,
+      documentScore: 0.00,
       confidenceLevel: 'Low',
       globalFlags: ['Unable to parse text into segments'],
       segments: []
@@ -646,7 +715,13 @@ export function analyzeText(inputText) {
   const documentWordCount = allWords.length;
   
   // ========================================================================
-  // SEGMENT-LEVEL ANALYSIS
+  // DETECT ARCHAIC/LITERARY ENGLISH (TIER 4 - CRITICAL BYPASS)
+  // ========================================================================
+  const { archaicCount, hasAnaphora } = detectArchaic(text);
+  const isArchaicText = archaicCount >= 3 || hasAnaphora;
+  
+  // ========================================================================
+  // SEGMENT-LEVEL ANALYSIS (Keep for heat-map visualization)
   // ========================================================================
   const segments = sentences.map(sentence => {
     const analysis = analyzeSegment(sentence, allWords);
@@ -660,104 +735,212 @@ export function analyzeText(inputText) {
   });
   
   // ========================================================================
-  // MACRO-DOCUMENT FEATURES
+  // COUNT AI & HUMAN SIGNALS AT DOCUMENT LEVEL
   // ========================================================================
+  
+  // TIER 1: Strong AI signals
+  let tier1Count = 0;
+  for (const word of allWords) {
+    if (TIER_1_VOCABULARY.has(word)) {
+      tier1Count++;
+    }
+  }
+  
+  // TIER 2: Connector phrases
+  let tier2Count = 0;
+  for (const connector of TIER_2_CONNECTORS) {
+    const regex = new RegExp(`\\b${connector.replace(/\s+/g, '\\s+')}\\b`, 'gi');
+    const matches = text.match(regex) || [];
+    tier2Count += matches.length;
+  }
+  
+  // HUMAN SIGNALS: Contractions
+  let contractionCount = 0;
+  const contractions = text.match(HUMAN_CONTRACTIONS) || [];
+  contractionCount = contractions.length;
+  
+  // HOUSE-KEEPING METRIC: Macro-document features for heuristic stacking
   const burstinessScore = calculateBurstiness(sentences);
   const redundancyScore = calculateRedundancy(sentences);
   const readabilityVarianceScore = calculateReadabilityVariance(sentences);
   
-  // Calculate mean segment score
-  const meanSegmentScore = segments.length > 0
-    ? segments.reduce((sum, seg) => sum + seg.segmentScore, 0) / segments.length
-    : 0.5;
-  
   // ========================================================================
-  // RAW ALGORITHMIC WEIGHT (before Sigmoid)
-  // Combine segment scores with macro-level features
+  // NEW EXPONENTIAL SCALING ALGORITHM
   // ========================================================================
-  let rawWeight = meanSegmentScore;
   
-  // Burstiness: Low variance = AI-like, so add positive contribution
-  rawWeight += burstinessScore * 0.20;
+  // ASYMMETRIC BASELINE: Default 8% (human is the baseline)
+  // Not 50% (undefined), but 0.08 (human is assumed most text is written by humans)
+  let aiWeight = 0.08;
   
-  // Redundancy: High overlap = AI-like, so add positive contribution
-  rawWeight += redundancyScore * 0.15;
-  
-  // Readability Variance: Zero variance = AI-like (uniform difficulty)
-  rawWeight += readabilityVarianceScore * 0.10;
-  
-  // Conservative adjustments
-  if (documentWordCount < 150) {
-    rawWeight = Math.min(rawWeight, 0.55); // Short text = less confidence
+  // LOG COMMENT: Exponential multiplication for Tier 1 (strong RLHF signals)
+  // Each occurrence multiplies weight exponentially, not additively
+  // Formula: aiWeight *= (1 + count)^1.5
+  // Example: 1x Tier1 → ×2^1.5 = ×2.83
+  //          3x Tier1 → ×4^1.5 = ×8.00
+  //          5x Tier1 → ×6^1.5 = ×14.70
+  if (tier1Count > 0) {
+    aiWeight *= Math.pow(1 + tier1Count, 1.5);
   }
   
-  if (documentWordCount > 2000) {
-    rawWeight = Math.max(rawWeight, 0.30); // Very long text biases human
+  // LOG COMMENT: Tier 2 connectors (structural/transitional framing)
+  // Weaker than Tier 1, use power of 1.2 instead of 1.5
+  if (tier2Count > 0) {
+    aiWeight *= Math.pow(1 + tier2Count, 1.2);
+  }
+  
+  // LOG COMMENT: Human signals as hard divisor (slash the score)
+  // Contractions are strong human signals; each reduces AI weight significantly
+  // Formula: aiWeight /= (1 + contractionCount)
+  // Example: 2 contractions → divide by 3 = ×0.333
+  if (contractionCount > 0) {
+    aiWeight /= (1 + contractionCount);
+  }
+  
+  // LOG COMMENT: Macro-document features (stacked heuristics)
+  // Low burstiness (uniform sentence length) = AI
+  // High redundancy (vocabulary overlap) = AI
+  // Zero readability variance (uniform difficulty) = AI
+  // Weak signals; multiply cautiously (~1.1-1.3 each)
+  if (burstinessScore < 0.30) {
+    aiWeight *= 1.15; // Low sentence variance is AI-like
+  }
+  
+  if (redundancyScore > 0.50) {
+    aiWeight *= 1.10; // High repetition is AI-like
+  }
+  
+  if (readabilityVarianceScore < 0.15) {
+    aiWeight *= 1.12; // Uniform readability (same difficulty throughout) = AI
   }
   
   // ========================================================================
-  // SIGMOID NORMALIZATION: Convert raw weight to [0, 1] probability
-  // midpoint=0.5 means 50% of cases hit around 0.5 score
-  // k=0.8 controls transition sharpness
+  // ARCHAIC/LITERARY BYPASS: Tier 4 Detection (THE BIBLE PROBLEM FIX)
   // ========================================================================
-  const documentScore = sigmoid(rawWeight, 0.8, 0.5);
+  // LOG COMMENT: If archaic English detected (thou, shalt, hath) OR
+  //              anaphora detected (consecutive sentences same first word),
+  //              drastically reduce AI score. Modern LLMs don't naturally write this way.
+  if (isArchaicText) {
+    // Multiply by 0.05-0.10 to slash score for literary/archaic works
+    // This prevents false positives on Bible, Shakespeare, ancient texts
+    aiWeight *= 0.05;
+  }
   
   // ========================================================================
-  // CONFIDENCE LEVEL & GLOBAL FLAGS
+  // ASYMMETRIC THRESHOLD: Multiple Overlapping Heuristics Required for >60%
+  // ========================================================================
+  // LOG COMMENT: Only push above 60% (0.60) if MULTIPLE signals align
+  // This prevents false positives and requires confidence in multiple dimensions
+  
+  const heuristicFlags = [];
+  if (tier1Count >= 5) heuristicFlags.push('high_tier1');
+  if (tier2Count >= 3) heuristicFlags.push('high_tier2');
+  if (burstinessScore < 0.30) heuristicFlags.push('low_burstiness');
+  if (redundancyScore > 0.50) heuristicFlags.push('high_redundancy');
+  if (readabilityVarianceScore < 0.15) heuristicFlags.push('uniform_readability');
+  
+  // Require at least 2 overlapping heuristic signals to exceed 60%
+  if (heuristicFlags.length < 2 && aiWeight > 0.60) {
+    aiWeight = 0.55; // Reduce to below threshold
+  }
+  
+  // ========================================================================
+  // CLAMP TO [0.00, 1.00] (No Sigmoid = Direct Score)
+  // ========================================================================
+  // LOG COMMENT: Exponential scaling naturally produces values in wider range
+  // Clamp final weight to [0.00, 1.00] with slight dampening for very high scores
+  const documentScore = Math.min(1.00, Math.max(0.00, aiWeight));
+  
+  // ========================================================================
+  // CONFIDENCE LEVEL ASSIGNMENT
   // ========================================================================
   let confidenceLevel = 'Low';
-  const globalFlags = [];
   
-  if (burstinessScore < 0.30) {
-    globalFlags.push('Low Sentence Variance');
-  }
-  if (redundancyScore > 0.50) {
-    globalFlags.push('High Repetition Index');
-  }
-  if (readabilityVarianceScore > 0.50) {
-    globalFlags.push('Uniform Readability (low variance)');
-  }
-  if (segments.some(s => s.segmentScore > 0.75)) {
-    globalFlags.push('High-Risk Segments Detected');
-  }
-  if (documentWordCount > 500) {
-    confidenceLevel = 'High';
-  } else if (documentWordCount > 250) {
+  if (documentWordCount > 800) {
+    confidenceLevel = 'High'; // Longer texts = more data = higher confidence
+  } else if (documentWordCount > 300) {
     confidenceLevel = 'Medium';
   } else {
-    confidenceLevel = 'Low';
+    confidenceLevel = 'Low'; // Short texts = low confidence
   }
   
-  if (documentScore > 0.75) {
-    globalFlags.push('Strong AI Detection Signals');
-  } else if (documentScore > 0.50) {
-    globalFlags.push('Mixed Indicators');
-  } else {
-    globalFlags.push('Strong Human Signals');
+  // ========================================================================
+  // GLOBAL FLAGS FOR USER COMMUNICATION
+  // ========================================================================
+  const globalFlags = [];
+  
+  if (isArchaicText) {
+    globalFlags.push('Archaic/Literary English detected (Tier 4)');
+  }
+  
+  if (tier1Count >= 5) {
+    globalFlags.push(`High Tier 1 AI vocabulary (${tier1Count} words)`);
+  }
+  
+  if (tier2Count >= 3) {
+    globalFlags.push(`Frequent structural connectors (${tier2Count} instances)`);
+  }
+  
+  if (contractionCount >= 3) {
+    globalFlags.push(`Strong human signals: ${contractionCount} contractions`);
+  }
+  
+  if (burstinessScore < 0.30) {
+    globalFlags.push('Low sentence length variance (AI pattern)');
+  }
+  
+  if (redundancyScore > 0.50) {
+    globalFlags.push('High vocabulary repetition index (AI pattern)');
+  }
+  
+  if (readabilityVarianceScore < 0.15) {
+    globalFlags.push('Uniform readability difficulty (AI pattern)');
+  }
+  
+  if (heuristicFlags.length < 2 && documentScore > 0.50) {
+    globalFlags.push('Single heuristic exceeded threshold—confidence reduced');
   }
   
   globalFlags.push('Heuristic estimate; not definitive proof');
   
   // ========================================================================
-  // RETURN SEGMENT-LEVEL SCHEMA FOR REACT HEAT-MAP
+  // SEGMENT NORMALIZATION FOR HEAT-MAP
+  // ========================================================================
+  // Scale segment scores relative to new document baseline
+  // Old segment scores were out of 0.5-1.0 range; adjust to 0.0-1.0
+  const normalizedSegments = segments.map(seg => {
+    // Re-normalize segment score using exponential baseline
+    // If document is 0.10 (very human), segment scores should average lower
+    // If document is 0.80 (very AI), segment scores should average higher
+    const relativeScore = Math.min(1.0, Math.max(0.0, seg.segmentScore * documentScore * 2));
+    return {
+      text: seg.text,
+      segmentScore: Math.round(relativeScore * 100),
+      flags: seg.flags
+    };
+  });
+  
+  // ========================================================================
+  // RETURN SCHEMA: Preserve segment-level heat-map integration
   // ========================================================================
   return {
-    documentScore: Math.round(documentScore * 100),
+    documentScore: parseFloat(documentScore.toFixed(2)),
     confidenceLevel,
     globalFlags,
-    segments: segments.map(seg => ({
-      text: seg.text,
-      segmentScore: Math.round(seg.segmentScore * 100),
-      flags: seg.flags
-    })),
-    // Optional: metadata for debugging
+    segments: normalizedSegments,
+    // Optional: metadata for debugging & validation
     _metadata: {
       totalSegments: segments.length,
+      documentWordCount,
+      tier1Count,
+      tier2Count,
+      contractionCount,
+      archaicCount,
+      hasAnaphora,
       burstinessScore: Math.round(burstinessScore * 100),
       redundancyScore: Math.round(redundancyScore * 100),
       readabilityVarianceScore: Math.round(readabilityVarianceScore * 100),
-      documentWordCount,
-      meanSegmentScore: Math.round(meanSegmentScore * 100)
+      heuristicFlagsDetected: heuristicFlags,
+      algorithm: 'exponential_scaling_v2'
     }
   };
 }
