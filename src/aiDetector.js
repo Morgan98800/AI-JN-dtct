@@ -1,6 +1,6 @@
 // src/aiDetector.js
-// Advanced production-grade AI text heuristic detector
-// Returns { score, riskLevel, flags, metrics } with tiered vocabulary analysis and burstiness detection
+// Segment-Level AI Text Heuristic Detector with Sigmoid Normalization
+// Returns { documentScore, confidenceLevel, globalFlags, segments[] } for heat-map highlighting
 
 // ============================================================================
 // TIER 1: HIGH AI CORRELATION VOCABULARY (RLHF-trained 2024-2026 over-indexed)
@@ -52,296 +52,430 @@ const HUMAN_SLANG = new Set([
 
 const HUMAN_FIRST_PERSON = /\b(I think|I believe|I found|I discovered|I experienced|we discovered|I personally|in my opinion|from my perspective|based on my experience)\b/gi;
 
+
 // ============================================================================
-// HELPER FUNCTIONS
+// MATHEMATICAL NORMALIZATION: Sigmoid Curve
+// Squashes raw algorithmic weight into strict [0.0, 1.0] probability range
 // ============================================================================
 
-function tokenize(text) {
+/**
+ * Sigmoid function: 1 / (1 + e^(-k * (x - midpoint)))
+ * @param {number} x - Raw score
+ * @param {number} k - Steepness (default 0.8, higher = sharper transition)
+ * @param {number} midpoint - Center point (default 0.5)
+ * @returns {number} Normalized score [0, 1]
+ */
+function sigmoid(x, k = 0.8, midpoint = 0.5) {
+  const exponent = -k * (x - midpoint);
+  // Guard against overflow
+  if (exponent > 100) return 0;
+  if (exponent < -100) return 1;
+  return 1 / (1 + Math.exp(exponent));
+}
+
+// ============================================================================
+// TOKENIZATION & SEGMENTATION (Robust, handles abbreviations)
+// ============================================================================
+
+/**
+ * Robust sentence tokenizer handling abbreviations (Dr., e.g., etc.)
+ * @param {string} text - Input text
+ * @returns {string[]} Array of sentences
+ */
+function tokenizeSentences(text) {
+  if (!text || !text.trim()) return [];
+  
+  // Protect abbreviations from splitting
+  const abbreviations = ['Dr.', 'Mr.', 'Mrs.', 'Ms.', 'Prof.', 'Sr.', 'Jr.', 'e.g.', 'i.e.', 'etc.', 'vs.', 'Inc.', 'Ltd.', 'Co.'];
+  let safeguardedText = text;
+  const placeholders = {};
+  
+  abbreviations.forEach((abbr, idx) => {
+    const placeholder = `__ABBR_${idx}__`;
+    placeholders[placeholder] = abbr;
+    safeguardedText = safeguardedText.replace(new RegExp(abbr.replace(/\./g, '\\.'), 'g'), placeholder);
+  });
+  
+  // Split on sentence boundaries
+  let sentences = safeguardedText.split(/(?<=[.!?])\s+(?=[A-Z])/);
+  
+  // Restore abbreviations and clean
+  sentences = sentences.map(s => {
+    Object.entries(placeholders).forEach(([placeholder, original]) => {
+      s = s.replace(placeholder, original);
+    });
+    return s.trim();
+  }).filter(s => s.length > 0);
+  
+  return sentences;
+}
+
+/**
+ * Tokenize text into words (cleaned)
+ * @param {string} text - Input text
+ * @returns {string[]} Array of words
+ */
+function tokenizeWords(text) {
   return text
     .toLowerCase()
     .replace(/[\u2018\u2019\u201C\u201D]/g, "'")
-    .replace(/[^a-z0-9'\-\s]/gi, ' ')
+    .replace(/[^a-z0-9'\-\s]/g, ' ')
     .trim()
     .split(/\s+/)
     .filter(Boolean);
 }
 
-function splitSentences(text) {
-  return text
-    .split(/[.!?]+/)
-    .map(s => s.trim())
-    .filter(s => s.length > 0);
+/**
+ * Calculate statistics for numeric array
+ */
+function arrayStats(arr) {
+  if (!arr.length) return { mean: 0, stddev: 0 };
+  const mean = arr.reduce((a, b) => a + b, 0) / arr.length;
+  const variance = arr.reduce((s, x) => s + Math.pow(x - mean, 2), 0) / arr.length;
+  const stddev = Math.sqrt(variance);
+  return { mean, stddev };
 }
 
-function splitParagraphs(text) {
-  return text.split(/\n\n+/).map(p => p.trim()).filter(p => p.length > 0);
-}
-
-function mean(arr) {
-  if (!arr.length) return 0;
-  return arr.reduce((a, b) => a + b, 0) / arr.length;
-}
-
-function stddev(arr) {
-  if (!arr.length) return 0;
-  const m = mean(arr);
-  return Math.sqrt(arr.reduce((s, x) => s + Math.pow(x - m, 2), 0) / arr.length);
-}
-
-function clamp(v, a, b) {
-  return Math.max(a, Math.min(b, v));
-}
-
-function countPhraseOccurrences(text, phrase) {
-  const escapedPhrase = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const regex = new RegExp(`\\b${escapedPhrase.replace(/\s+/g, '\\s+')}\\b`, 'gi');
-  const matches = text.match(regex);
-  return matches ? matches.length : 0;
-}
+// ============================================================================
+// SEGMENT-LEVEL FEATURE EXTRACTION
+// ============================================================================
 
 /**
- * Advanced Burstiness Score
- * Human writing: high variance (10-15+)
- * AI writing: low variance (3-8)
+ * Analyze a single segment (sentence/paragraph)
+ * @param {string} segmentText - The segment to analyze
+ * @param {string[]} documentWords - All words from document (for diversity context)
+ * @returns {object} rawScore and flags for this segment
  */
-function calculateBurstinessScore(sentenceLengths) {
-  if (sentenceLengths.length < 3) return 0.5;
+function analyzeSegment(segmentText, documentWords = []) {
+  const flags = [];
+  let rawScore = 0.5; // Neutral baseline
   
-  const variance = stddev(sentenceLengths);
-  const meanLen = mean(sentenceLengths);
-  const cv = meanLen > 0 ? variance / meanLen : 0;
+  if (!segmentText || segmentText.trim().length === 0) {
+    return { rawScore: 0, flags, wordCount: 0 };
+  }
   
-  if (cv < 0.25) return 0.8; // very AI-like (uniform)
-  if (cv < 0.4) return 0.5; // neutral
-  if (cv < 0.6) return 0.3; // human-like (varied)
-  return 0.1; // very human-like (highly varied)
-}
-
-/**
- * Paragraph Uniformity Score
- */
-function calculateParagraphUniformityScore(paragraphs) {
-  if (paragraphs.length < 3) return 0.5;
-
-  const paragraphLengths = paragraphs.map(p => tokenize(p).length);
-  const variance = stddev(paragraphLengths);
-  const meanLen = mean(paragraphLengths);
-  const cv = meanLen > 0 ? variance / meanLen : 0;
+  const words = tokenizeWords(segmentText);
+  const wordCount = words.length;
   
-  if (cv < 0.25) return 0.75; // AI-like
-  if (cv < 0.4) return 0.5; // neutral
-  return 0.2; // human-like
-}
-
-/**
- * Type-Token Ratio (Lexical Diversity)
- */
-function calculateLexicalDiversity(words) {
-  if (!words.length) return 0;
-  const uniqueWords = new Set(words);
-  return uniqueWords.size / words.length;
-}
-
-/**
- * Count vocabulary matches
- */
-function countVocabularyMatches(words, vocabularySet) {
-  let count = 0;
+  if (wordCount === 0) {
+    return { rawScore: 0, flags, wordCount: 0 };
+  }
+  
+  // --- LEXICAL FLAGS: Tier 1, 2, 3 Vocabularies ---
+  let tier1Count = 0;
+  let tier2Count = 0;
+  let tier3Count = 0;
+  
   for (const word of words) {
-    if (vocabularySet.has(word)) count++;
+    if (TIER_1_VOCABULARY.has(word)) {
+      tier1Count++;
+    }
   }
-  return count;
-}
-
-/**
- * Count connector occurrences
- */
-function countConnectorMatches(text, connectorSet) {
-  let count = 0;
-  for (const connector of connectorSet) {
-    count += countPhraseOccurrences(text, connector);
-  }
-  return count;
-}
-
-/**
- * Analyze concrete details (human signal)
- */
-function analyzeConcreteDetails(text) {
-  const years = (text.match(/\b(19|20)\d{2}\b/g) || []).length;
-  const dates = (text.match(/\b(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\b/gi) || []).length;
-  const times = (text.match(/\b([0-1]?[0-9]|2[0-3]):[0-5][0-9]\b/g) || []).length;
-  const percents = (text.match(/\d+%|%\d+/g) || []).length;
-  const money = (text.match(/\$\d+|£\d+|€\d+|\d+\s?(USD|GBP|EUR)/gi) || []).length;
   
-  return { years, dates, times, percents, money, total: years + dates + times + percents + money };
+  // Connector phrases
+  for (const connector of TIER_2_CONNECTORS) {
+    const regex = new RegExp(`\\b${connector.replace(/\s+/g, '\\s+')}\\b`, 'gi');
+    const matches = segmentText.match(regex);
+    if (matches) {
+      tier2Count += matches.length;
+    }
+  }
+  
+  for (const hedge of TIER_3_HEDGES) {
+    const regex = new RegExp(`\\b${hedge.replace(/\s+/g, '\\s+')}\\b`, 'gi');
+    const matches = segmentText.match(regex);
+    if (matches) {
+      tier3Count += matches.length;
+    }
+  }
+  
+  // Tier 1: Strong AI signal
+  if (tier1Count > 0) {
+    rawScore += (tier1Count / wordCount) * 0.25;
+    flags.push(`Tier 1 Vocab: ${Math.min(tier1Count, 3)} words`);
+  }
+  
+  // Tier 2: Structural connector signal
+  if (tier2Count > 0) {
+    rawScore += (tier2Count / wordCount) * 0.20;
+    flags.push(`Tier 2 Connector: ${tier2Count} transition(s)`);
+  }
+  
+  // Tier 3: Hedge/safety padding signal
+  if (tier3Count > 0) {
+    rawScore += (tier3Count / wordCount) * 0.10;
+    flags.push(`Tier 3 Hedge: safety padding detected`);
+  }
+  
+  // --- STRUCTURAL METRICS ---
+  const sentenceLength = words.length;
+  
+  // Punctuation density (em-dash and colons are more AI-like)
+  const emDashCount = (segmentText.match(/—/g) || []).length;
+  const colonCount = (segmentText.match(/:/g) || []).length;
+  const punctScore = (emDashCount * 0.06) + (colonCount * 0.04);
+  rawScore += Math.min(punctScore, 0.15);
+  
+  if (emDashCount > 1 || colonCount > 2) {
+    flags.push('Higher punctuation density detected');
+  }
+  
+  // --- HUMAN MODIFIERS (Reducers) ---
+  
+  // Contractions: Strong human signal
+  const contractions = (segmentText.match(HUMAN_CONTRACTIONS) || []).length;
+  if (contractions > 0) {
+    rawScore -= (contractions / wordCount) * 0.20;
+    flags.push(`Human signal: ${contractions} contraction(s)`);
+  }
+  
+  // Slang/informal words
+  let slangCount = 0;
+  for (const slang of HUMAN_SLANG) {
+    const regex = new RegExp(`\\b${slang}\\b`, 'gi');
+    const matches = segmentText.match(regex);
+    if (matches) slangCount += matches.length;
+  }
+  if (slangCount > 0) {
+    rawScore -= (slangCount / wordCount) * 0.15;
+    flags.push(`Informal style: ${slangCount} slang word(s)`);
+  }
+  
+  // First-person pronouns/phrasing
+  const firstPerson = (segmentText.match(HUMAN_FIRST_PERSON) || []).length;
+  if (firstPerson > 0) {
+    rawScore -= 0.15;
+    flags.push('First-person phrasing detected');
+  }
+  
+  // Concrete details (dates, years, specific numbers)
+  const years = (segmentText.match(/\b(19|20)\d{2}\b/g) || []).length;
+  const dates = (segmentText.match(/\b(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\b/gi) || []).length;
+  const specificNumbers = (segmentText.match(/\b\d{1,}\b/g) || []).length;
+  const concreteCount = years + dates + (specificNumbers > 0 ? 1 : 0);
+  
+  if (concreteCount > 0) {
+    rawScore -= Math.min(concreteCount * 0.08, 0.20);
+    if (years > 0) flags.push(`Concrete year(s): ${years}`);
+    if (dates > 0) flags.push(`Specific date(s): ${dates}`);
+  }
+  
+  // Clamp per-segment score
+  rawScore = Math.max(0, Math.min(rawScore, 1));
+  
+  return {
+    rawScore,
+    wordCount,
+    flags,
+    metrics: {
+      tier1Count,
+      tier2Count,
+      tier3Count,
+      contractionCount: contractions,
+      slangCount,
+      firstPersonCount: firstPerson
+    }
+  };
+}
+
+// ============================================================================
+// MACRO-DOCUMENT CONTEXT (Cross-Segment Features)
+// ============================================================================
+
+/**
+ * Calculate burstiness (sentence length variance)
+ * Low variance = AI-like; High variance = Human-like
+ */
+function calculateBurstiness(sentences) {
+  if (sentences.length < 2) return 0.5;
+  
+  const lengths = sentences.map(s => tokenizeWords(s).length).filter(l => l > 0);
+  if (lengths.length < 2) return 0.5;
+  
+  const stats = arrayStats(lengths);
+  const cv = stats.mean > 0 ? stats.stddev / stats.mean : 0;
+  
+  // Lower CV → more AI-like (uniform sentence lengths)
+  if (cv < 0.20) return 0.80;
+  if (cv < 0.35) return 0.60;
+  if (cv < 0.55) return 0.40;
+  return 0.15; // High variance = very human-like
+}
+
+/**
+ * Calculate redundancy index (vocabulary overlap between consecutive segments)
+ * High overlap = more AI-like (repetition of root nouns/verbs)
+ */
+function calculateRedundancy(segments) {
+  if (segments.length < 2) return 0;
+  
+  let totalOverlap = 0;
+  let pairCount = 0;
+  
+  for (let i = 0; i < segments.length - 1; i++) {
+    const words1 = new Set(tokenizeWords(segments[i]));
+    const words2 = new Set(tokenizeWords(segments[i + 1]));
+    
+    let intersection = 0;
+    for (const word of words1) {
+      if (words2.has(word)) intersection++;
+    }
+    
+    const union = new Set([...words1, ...words2]).size;
+    const jaccard = union > 0 ? intersection / union : 0;
+    totalOverlap += jaccard;
+    pairCount++;
+  }
+  
+  const avgOverlap = pairCount > 0 ? totalOverlap / pairCount : 0;
+  
+  // Average Jaccard similarity; higher = more repetitive (AI-like)
+  if (avgOverlap > 0.40) return 0.75; // Very repetitive
+  if (avgOverlap > 0.30) return 0.50; // Moderate
+  return 0.20; // Low repetition (human-like)
 }
 
 // ============================================================================
 // MAIN EXPORT: analyzeText(inputText)
 // ============================================================================
 
+/**
+ * Complete segment-level AI text analysis with Sigmoid normalization
+ * @param {string} inputText - Text to analyze
+ * @returns {object} { documentScore, confidenceLevel, globalFlags, segments[] }
+ */
 export function analyzeText(inputText) {
-  const text = (inputText || '').toString();
-  const flags = [];
+  const text = (inputText || '').toString().trim();
   
-  if (!text.trim()) {
+  if (!text) {
     return {
-      score: 0,
-      riskLevel: 'low',
-      flags: ['No text provided; cannot analyze.'],
-      metrics: {
-        wordCount: 0, sentenceCount: 0, paragraphCount: 0,
-        avgSentenceLength: 0, burstinessScore: 0, lexicalDiversity: 0,
-        tier1Score: 0, tier2Score: 0, tier3Score: 0, contractionCount: 0
-      }
+      documentScore: 0,
+      confidenceLevel: 'Low',
+      globalFlags: ['No text provided'],
+      segments: []
     };
   }
-
+  
+  // Segment the text
+  const sentences = tokenizeSentences(text);
+  
+  if (sentences.length === 0) {
+    return {
+      documentScore: 0,
+      confidenceLevel: 'Low',
+      globalFlags: ['Unable to parse text into segments'],
+      segments: []
+    };
+  }
+  
+  const allWords = tokenizeWords(text);
+  const documentWordCount = allWords.length;
+  
   // ========================================================================
-  // BASIC METRICS
+  // SEGMENT-LEVEL ANALYSIS
   // ========================================================================
-  const words = tokenize(text);
-  const wordCount = words.length;
-  const sentences = splitSentences(text);
-  const sentenceCount = sentences.length;
-  const paragraphs = splitParagraphs(text);
-  const paragraphCount = paragraphs.length;
-
-  const sentenceLengths = sentences.map(s => tokenize(s).length || 0).filter(l => l > 0);
-  const avgSentenceLength = sentenceLengths.length ? mean(sentenceLengths) : 0;
-
-  // ========================================================================
-  // ADVANCED METRICS
-  // ========================================================================
-  const burstinessScore = calculateBurstinessScore(sentenceLengths);
-  const paragraphUniformityScore = calculateParagraphUniformityScore(paragraphs);
-  const lexicalDiversity = calculateLexicalDiversity(words);
-  
-  const tier1Count = countVocabularyMatches(words, TIER_1_VOCABULARY);
-  const tier1Density = wordCount ? tier1Count / wordCount : 0;
-  const tier1Score = Math.min(1, tier1Density * 10);
-  
-  const tier2Count = countConnectorMatches(text, TIER_2_CONNECTORS);
-  const tier2Density = wordCount ? tier2Count / wordCount : 0;
-  const tier2Score = Math.min(0.7, tier2Density * 20);
-  
-  const tier3Count = countConnectorMatches(text, TIER_3_HEDGES);
-  const tier3Density = wordCount ? tier3Count / wordCount : 0;
-  const tier3Score = Math.min(0.5, tier3Density * 15);
-  
-  const contractionMatches = text.match(HUMAN_CONTRACTIONS) || [];
-  const contractionCount = contractionMatches.length;
-  const contractionDensity = wordCount ? contractionCount / wordCount : 0;
-  
-  const slangMatches = Array.from(HUMAN_SLANG).filter(slang => {
-    const regex = new RegExp(`\\b${slang}\\b`, 'gi');
-    return regex.test(text);
+  const segments = sentences.map(sentence => {
+    const analysis = analyzeSegment(sentence, allWords);
+    return {
+      text: sentence,
+      segmentScore: analysis.rawScore,
+      flags: analysis.flags,
+      wordCount: analysis.wordCount,
+      metrics: analysis.metrics
+    };
   });
-  const slangScore = slangMatches.length > 0 ? 0.1 * slangMatches.length : 0;
   
-  const firstPersonMatches = text.match(HUMAN_FIRST_PERSON) || [];
-  const firstPersonCount = firstPersonMatches.length;
-  const firstPersonScore = Math.min(0.3, firstPersonCount * 0.05);
+  // ========================================================================
+  // MACRO-DOCUMENT FEATURES
+  // ========================================================================
+  const burstinessScore = calculateBurstiness(sentences);
+  const redundancyScore = calculateRedundancy(sentences);
   
-  const concreteDetails = analyzeConcreteDetails(text);
-  const concreteScore = Math.min(0.25, concreteDetails.total / 10);
-
+  // Calculate mean segment score
+  const meanSegmentScore = segments.length > 0
+    ? segments.reduce((sum, seg) => sum + seg.segmentScore, 0) / segments.length
+    : 0.5;
+  
   // ========================================================================
-  // AI SCORE CALCULATION
+  // RAW ALGORITHMIC WEIGHT (before Sigmoid)
+  // Combine segment scores with macro-level features
   // ========================================================================
-  let aiScore = 0.5;
-
-  aiScore += burstinessScore * 0.20;
-  aiScore += paragraphUniformityScore * 0.15;
-  aiScore += (1 - lexicalDiversity) * 0.15;
-  aiScore += tier1Score * 0.15;
-  aiScore += tier2Score * 0.20;
-  aiScore += tier3Score * 0.10;
-
-  aiScore -= contractionDensity * 0.15;
-  aiScore -= Math.min(0.15, slangScore);
-  aiScore -= firstPersonScore;
-  aiScore -= concreteScore;
-
-  // ========================================================================
-  // CONSERVATIVE BIAS & PROTECTIONS
-  // ========================================================================
-
-  if (wordCount < 300) {
-    aiScore = Math.min(aiScore, 0.6);
-    flags.push('Text too short for high confidence (< 300 words)');
+  let rawWeight = meanSegmentScore;
+  
+  // Burstiness: Low variance = AI-like, so add positive contribution
+  rawWeight += burstinessScore * 0.20;
+  
+  // Redundancy: High overlap = AI-like, so add positive contribution
+  rawWeight += redundancyScore * 0.15;
+  
+  // Conservative adjustments
+  if (documentWordCount < 150) {
+    rawWeight = Math.min(rawWeight, 0.55); // Short text = less confidence
   }
-
-  if (tier2Count > 3 && burstinessScore < 0.3 && concreteDetails.total > 5 && contractionCount > 2) {
-    aiScore = Math.min(aiScore, 0.35);
-    flags.push('Formal human writing detected with connections');
+  
+  if (documentWordCount > 2000) {
+    rawWeight = Math.max(rawWeight, 0.30); // Very long text biases human
   }
-
-  if (burstinessScore < 0.2 && concreteDetails.total > 8) {
-    aiScore = Math.min(aiScore, 0.25);
-    flags.push('Strong human signals: high sentence variance + concrete details');
-  }
-
-  if (contractionCount > 5 && slangMatches.length > 2) {
-    aiScore = Math.min(aiScore, 0.30);
-    flags.push('Informal conversational style detected');
-  }
-
-  if (wordCount > 500 && tier2Count > 8 && burstinessScore > 0.4 && lexicalDiversity > 0.55) {
-    aiScore = Math.min(aiScore, 0.45);
-    flags.push('Formal academic writing detected');
-  }
-
-  aiScore = clamp(aiScore, 0, 1);
-
+  
   // ========================================================================
-  // DETERMINE RISK LEVEL
+  // SIGMOID NORMALIZATION: Convert raw weight to [0, 1] probability
+  // midpoint=0.5 means 50% of cases hit around 0.5 score
+  // k=0.8 controls transition sharpness
   // ========================================================================
-  let riskLevel = 'low';
-
-  if (aiScore < 0.25) {
-    riskLevel = 'low';
-  } else if (aiScore < 0.5) {
-    riskLevel = 'medium';
-  } else if (aiScore < 0.75) {
-    riskLevel = 'high';
+  const documentScore = sigmoid(rawWeight, 0.8, 0.5);
+  
+  // ========================================================================
+  // CONFIDENCE LEVEL & GLOBAL FLAGS
+  // ========================================================================
+  let confidenceLevel = 'Low';
+  const globalFlags = [];
+  
+  if (burstinessScore < 0.30) {
+    globalFlags.push('Low Sentence Variance');
+  }
+  if (redundancyScore > 0.50) {
+    globalFlags.push('High Repetition Index');
+  }
+  if (segments.some(s => s.segmentScore > 0.75)) {
+    globalFlags.push('High-Risk Segments Detected');
+  }
+  if (documentWordCount > 500) {
+    confidenceLevel = 'High';
+  } else if (documentWordCount > 250) {
+    confidenceLevel = 'Medium';
   } else {
-    riskLevel = 'very_high';
+    confidenceLevel = 'Low';
   }
-
-  if (riskLevel === 'very_high') {
-    flags.push('Strong indicators of AI-generated content');
-  } else if (riskLevel === 'high') {
-    flags.push('Multiple AI-like characteristics detected');
-  } else if (riskLevel === 'medium') {
-    flags.push('Mixed signals; text may contain AI-assisted sections');
+  
+  if (documentScore > 0.75) {
+    globalFlags.push('Strong AI Detection Signals');
+  } else if (documentScore > 0.50) {
+    globalFlags.push('Mixed Indicators');
+  } else {
+    globalFlags.push('Strong Human Signals');
   }
-
-  if (!flags.find(f => f.includes('heuristic'))) {
-    flags.push('This is a heuristic estimate; not definitive proof');
-  }
-
+  
+  globalFlags.push('Heuristic estimate; not definitive proof');
+  
   // ========================================================================
-  // RETURN STRUCTURE
+  // RETURN SEGMENT-LEVEL SCHEMA FOR REACT HEAT-MAP
   // ========================================================================
   return {
-    score: Math.round(aiScore * 100),
-    riskLevel,
-    flags,
-    metrics: {
-      wordCount,
-      sentenceCount,
-      paragraphCount,
-      avgSentenceLength: Math.round(avgSentenceLength * 10) / 10,
-      burstinessScore: Math.round(burstinessScore * 100) / 100,
-      lexicalDiversity: Math.round(lexicalDiversity * 100) / 100,
-      tier1VocabScore: Math.round(tier1Score * 100) / 100,
-      tier2ConnectorScore: Math.round(tier2Score * 100) / 100,
-      tier3HedgeScore: Math.round(tier3Score * 100) / 100,
-      contractionCount,
-      slangWordsDetected: slangMatches,
-      concreteDetails
+    documentScore: Math.round(documentScore * 100),
+    confidenceLevel,
+    globalFlags,
+    segments: segments.map(seg => ({
+      text: seg.text,
+      segmentScore: Math.round(seg.segmentScore * 100),
+      flags: seg.flags
+    })),
+    // Optional: metadata for debugging
+    _metadata: {
+      totalSegments: segments.length,
+      burstinessScore: Math.round(burstinessScore * 100),
+      redundancyScore: Math.round(redundancyScore * 100),
+      documentWordCount,
+      meanSegmentScore: Math.round(meanSegmentScore * 100)
     }
   };
 }
