@@ -1,11 +1,11 @@
 import React, { useState } from 'react'
 import detectAI from './aiDetector'
 
-// Helper function: Return CSS risk class based on document score
+// Helper function: Return CSS risk class based on document score (0.00-1.00 float)
 function getRiskLevel(score) {
-  if (score < 25) return 'low'
-  if (score < 50) return 'medium'
-  if (score < 75) return 'high'
+  if (score < 0.25) return 'low'
+  if (score < 0.50) return 'medium'
+  if (score < 0.75) return 'high'
   return 'very_high'
 }
 
@@ -64,7 +64,7 @@ export default function App(){
         <section className="result">
           <h2>
             AI Likelihood: <span className={`risk-${getRiskLevel(result.documentScore)}`}>
-              {result.documentScore}%
+              {(result.documentScore * 100).toFixed(1)}%
             </span>
           </h2>
           <p style={{ marginTop: '4px', fontSize: '13px', color: 'rgba(230,238,248,0.7)' }}>
@@ -119,7 +119,16 @@ export default function App(){
                 <ul>
                   <li>Total Words: <strong>{result._metadata.documentWordCount}</strong></li>
                   <li>Total Segments: <strong>{result._metadata.totalSegments}</strong></li>
-                  <li>Mean Segment Score: <strong>{result._metadata.meanSegmentScore}%</strong></li>
+                  <li>Tier 1 AI Vocab: <strong>{result._metadata.tier1Count}</strong></li>
+                  <li>Contractions: <strong>{result._metadata.contractionCount}</strong></li>
+                </ul>
+              </div>
+
+              <div className="metric-card">
+                <h4>Archaic Markers (Tier 4)</h4>
+                <ul>
+                  <li>Archaic Words: <strong>{result._metadata.archaicCount}</strong></li>
+                  <li>Anaphora Detected: <strong>{result._metadata.hasAnaphora ? 'Yes' : 'No'}</strong></li>
                 </ul>
               </div>
 
@@ -128,24 +137,38 @@ export default function App(){
                 <ul>
                   <li>Sentence Burstiness: <strong>{result._metadata.burstinessScore}%</strong></li>
                   <li>Vocabulary Redundancy: <strong>{result._metadata.redundancyScore}%</strong></li>
+                  <li>Readability Variance: <strong>{result._metadata.readabilityVarianceScore}%</strong></li>
                 </ul>
               </div>
 
               <div className="metric-card">
                 <h4>What These Mean</h4>
                 <ul>
-                  <li><strong>Burstiness:</strong> Low = AI (uniform); High = Human (varied)</li>
-                  <li><strong>Redundancy:</strong> High = AI (repetitive); Low = Human</li>
+                  <li><strong>Burstiness:</strong> Low = AI (uniform sentence lengths); High = Human (varied)</li>
+                  <li><strong>Redundancy:</strong> High = AI (repetitive vocabulary); Low = Human</li>
+                  <li><strong>Archaic:</strong> Detected = Literature/Bible (reduces AI score)</li>
                 </ul>
               </div>
 
               <div className="metric-card">
-                <h4>Score Interpretation</h4>
+                <h4>FIXED: Exponential Scaling + Archaic Bypass</h4>
                 <ul>
-                  <li><strong>0-25%:</strong> Very likely human</li>
-                  <li><strong>25-50%:</strong> Likely human</li>
-                  <li><strong>50-75%:</strong> Likely AI</li>
-                  <li><strong>75-100%:</strong> Very likely AI</li>
+                  <li><strong>New Algorithm:</strong> Fixes "Sigmoid Collapse"</li>
+                  <li><strong>Archaic Detection:</strong> Fixes "Bible Problem"</li>
+                  <li><strong>Asymmetric Baseline:</strong> 8% human (not 50% undefined)</li>
+                  <li style={{ fontSize: '12px', marginTop: '6px', color: 'rgba(230,238,248,0.7)' }}>
+                    Requires multiple overlapping heuristics to trigger &gt;60% score
+                  </li>
+                </ul>
+              </div>
+
+              <div className="metric-card">
+                <h4>Score Interpretation (0.00-1.00)</h4>
+                <ul>
+                  <li><strong>0.00-0.25:</strong> Very likely human (green)</li>
+                  <li><strong>0.25-0.50:</strong> Likely human (amber)</li>
+                  <li><strong>0.50-0.75:</strong> Likely AI (red)</li>
+                  <li><strong>0.75-1.00:</strong> Very likely AI (dark red)</li>
                 </ul>
               </div>
             </div>
